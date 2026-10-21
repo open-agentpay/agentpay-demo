@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full bg-slate-950 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="page_title">AgentPay 晨间简报验证 Demo - 金融防火墙与自主微支付</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    /* Custom scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .pulse-dot {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: .4; transform: scale(0.9); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeIn {
+      animation: fadeIn 0.25s ease-out forwards;
+    }
+  </style>
+</head>
+<body class="h-full flex flex-col font-sans antialiased overflow-hidden">
+
+  <!-- Top Navigation Bar -->
+  <header class="h-14 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-6 flex items-center justify-between shrink-0">
+    <div class="flex items-center space-x-3">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-cyan-400 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+        AP
+      </div>
+      <div>
+        <h1 class="text-sm font-semibold tracking-wide flex items-center gap-2">
+          <span data-i18n="nav_title">AgentPay Autonomous Micro-Payment Demo</span>
+          <span class="text-xs bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-2 py-0.5 rounded-full font-mono">x402 V2 Protocol</span>
+        </h1>
+        <p class="text-[11px] text-slate-400" data-i18n="nav_subtitle">Zero-Trust Financial Firewall for Autonomous AI Agents</p>
+      </div>
+    </div>
+    
+    <div class="flex items-center space-x-3">
+      <!-- Highly Visible Segmented Language Switcher -->
+      <div class="flex items-center bg-slate-800/90 border border-slate-700/80 rounded-lg p-0.5 text-xs shadow-inner">
+        <button id="lang-btn-zh" class="px-2.5 py-1 rounded-md transition font-medium text-white bg-indigo-600 shadow-sm flex items-center gap-1">
+          <span>🇨🇳</span>
+          <span>中文</span>
+        </button>
+        <button id="lang-btn-en" class="px-2.5 py-1 rounded-md transition font-medium text-slate-400 hover:text-slate-200 flex items-center gap-1">
+          <span>🇺🇸</span>
+          <span>English</span>
+        </button>
+      </div>
+
+      <!-- SSE Status -->
+      <div class="flex items-center gap-2 text-xs bg-slate-800/80 border border-slate-700/60 px-3 py-1.5 rounded-lg">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
+        <span class="text-slate-400" data-i18n="sse_feed_label">SSE Feed:</span>
+        <span id="sse-status" class="text-emerald-400 font-mono">Connected</span>
+      </div>
+
+      <!-- Reset Policy -->
+      <button id="btn-reset-policy" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+        <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+        <span data-i18n="btn_reset_policy">重置默认策略</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Grid Layout -->
+  <div class="flex-1 grid grid-cols-12 min-h-0 divide-x divide-slate-800">
+
+    <!-- LEFT COLUMN: Agent Chat & Scenario Selector (7 cols) -->
+    <section class="col-span-7 flex flex-col min-h-0 bg-slate-950">
+      
+      <!-- Scenario Selector Bar -->
+      <div class="p-3 border-b border-slate-800/80 bg-slate-900/40 shrink-0">
+        <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold mb-2 flex items-center justify-between">
+          <span data-i18n="scenarios_bar_title">⚡ 核心验证场景一键触发 (Click to Test)</span>
+          <span class="text-[10px] text-indigo-400" data-i18n="scenarios_bar_subtitle">零配置即刻体验</span>
+        </div>
+        <div class="grid grid-cols-5 gap-2" id="scenarios-container">
+          <!-- Dynamically populated buttons -->
+        </div>
+      </div>
+
+      <!-- Chat Dialogue Container -->
+      <div id="chat-messages" class="flex-1 p-4 overflow-y-auto space-y-4">
+        <!-- Welcome Message -->
+        <div class="flex items-start gap-3" id="welcome-message-card">
+          <div class="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center shrink-0 text-white font-bold text-xs">
+            🤖
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 max-w-[85%] text-sm space-y-2 leading-relaxed" id="welcome-content">
+            <!-- Populated via i18n -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Input Area -->
+      <div class="p-4 border-t border-slate-800 bg-slate-900/50 shrink-0">
+        <form id="chat-form" class="flex items-center gap-2">
+          <input 
+            type="text" 
+            id="chat-input"
+            data-i18n-placeholder="chat_input_placeholder"
+            placeholder="输入指令，例如: 帮我准备今天的简报，包含北京天气和摩羯座运势..." 
+            class="flex-1 bg-slate-900 border border-slate-700/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition"
+          />
+          <button 
+            type="submit" 
+            id="btn-send"
+            class="bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-medium px-4 py-2.5 rounded-xl text-sm flex items-center gap-1.5 transition shadow-lg shadow-indigo-600/30"
+          >
+            <span data-i18n="btn_send">发送</span>
+            <i data-lucide="send" class="w-4 h-4"></i>
+          </button>
+        </form>
+      </div>
+
+    </section>
+
+    <!-- RIGHT COLUMN: Financial Firewall & Live Audit Panel (5 cols) -->
+    <section class="col-span-5 flex flex-col min-h-0 bg-slate-900/30">
+      
+      <!-- Panel Header -->
+      <div class="p-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 bg-slate-900/60">
+        <div class="flex items-center gap-2">
+          <i data-lucide="shield-check" class="w-4 h-4 text-emerald-400"></i>
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-200" data-i18n="dashboard_title">金融防火墙与微支付审计看板</h2>
+        </div>
+        <span class="text-[11px] font-mono text-slate-400" id="wallet-display">0x90f8...c1</span>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-4 space-y-4">
+        
+        <!-- Metrics Cards Grid -->
+        <div class="grid grid-cols-2 gap-3">
+          
+          <!-- 24h Rolling Budget Card -->
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-slate-400 flex items-center gap-1.5">
+                <i data-lucide="wallet" class="w-3.5 h-3.5 text-indigo-400"></i>
+                <span data-i18n="metric_budget_label">24H 滚动预算</span>
+              </span>
+              <span id="metric-budget-percent" class="text-xs font-mono font-semibold text-emerald-400">0%</span>
+            </div>
+            <div class="flex items-baseline justify-between">
+              <span id="metric-spent-budget" class="text-lg font-bold font-mono text-slate-100">$0.0000</span>
+              <span id="metric-total-budget" class="text-xs text-slate-500 font-mono">/ $0.1000</span>
+            </div>
+            <!-- Progress Bar -->
+            <div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+              <div id="budget-progress-bar" class="bg-gradient-to-r from-emerald-500 to-indigo-500 h-full w-[0%] transition-all duration-500"></div>
+            </div>
+            <div class="text-[11px] text-slate-400 flex justify-between font-mono">
+              <span data-i18n="metric_avail_label">可用额度:</span>
+              <span id="metric-avail-budget" class="text-emerald-400 font-semibold">$0.1000 USDC</span>
+            </div>
+          </div>
+
+          <!-- Single-Tx Cap & Circuit Breaker Card -->
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-slate-400 flex items-center gap-1.5">
+                <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>
+                <span data-i18n="metric_breaker_label">熔断与单笔限额</span>
+              </span>
+              <span id="breaker-badge" class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                CLOSED
+              </span>
+            </div>
+            <div class="flex items-baseline justify-between pt-1">
+              <span class="text-xs text-slate-400" data-i18n="metric_cap_label">单笔上限:</span>
+              <span id="metric-max-per-tx" class="text-sm font-bold font-mono text-slate-100">$0.0100 USDC</span>
+            </div>
+            <div class="flex items-baseline justify-between">
+              <span class="text-xs text-slate-400" data-i18n="metric_rpm_label">频率限制:</span>
+              <span id="metric-circuit-rpm" class="text-xs font-mono text-amber-400 font-medium">20 RPM</span>
+            </div>
+            <div class="text-[10px] text-slate-500 pt-1 border-t border-slate-800/80 flex justify-between">
+              <span data-i18n="metric_fail_closed_label">Fail-Closed 模式:</span>
+              <span class="text-emerald-400" data-i18n="metric_fail_closed_val">已激活 🔒</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Live x402 Feed Section -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-3">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div class="flex items-center gap-2">
+              <i data-lucide="activity" class="w-4 h-4 text-cyan-400"></i>
+              <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wide" data-i18n="live_feed_heading">实时微支付审计流 (Live x402 Feed)</h3>
+            </div>
+            <span class="text-[11px] text-slate-400 font-mono" id="feed-count">0 条记录</span>
+          </div>
+          
+          <!-- Feed List Container -->
+          <div id="live-feed" class="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+            <div class="text-xs text-slate-500 text-center py-6" id="feed-empty-item" data-i18n="feed_empty_text">
+              等待支付请求发起...
+            </div>
+          </div>
+        </div>
+
+        <!-- Zero-Trust Policy Matrix Inspector -->
+        <div class="bg-slate-900/60 border border-slate-800/80 rounded-xl p-3.5 space-y-2 text-xs">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5 text-slate-300 font-semibold">
+              <i data-lucide="lock" class="w-3.5 h-3.5 text-indigo-400"></i>
+              <span data-i18n="matrix_heading">Zero-Trust 策略白名单矩阵 (Read-Only)</span>
+            </div>
+            <span class="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.2 rounded" id="agent-key-display">apk_live_...7ad2</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-400 pt-1">
+            <div class="bg-slate-950/60 p-2 rounded border border-slate-800">
+              <span class="text-slate-500 block text-[10px]" data-i18n="mat_network">WHITELIST_NETWORKS</span>
+              <span class="text-indigo-300">eip155:421614 (Arb)</span>
+            </div>
+            <div class="bg-slate-950/60 p-2 rounded border border-slate-800">
+              <span class="text-slate-500 block text-[10px]" data-i18n="mat_asset">WHITELIST_ASSET</span>
+              <span class="text-indigo-300">USDC (0x75fa...AA4d)</span>
+            </div>
+            <div class="bg-slate-950/60 p-2 rounded border border-slate-800">
+              <span class="text-slate-500 block text-[10px]" data-i18n="mat_payee">PAYEE_WHITELIST</span>
+              <span class="text-indigo-300">0x1111...1111 (Seller)</span>
+            </div>
+            <div class="bg-slate-950/60 p-2 rounded border border-slate-800">
+              <span class="text-slate-500 block text-[10px]" data-i18n="mat_engine">ENGINE_TYPE</span>
+              <span class="text-emerald-300">SQLite In-Memory WAL</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </div>
+
+  <!-- Cache-busting query param ensures fresh script loading -->
+  <script src="/static/app.js?v=20261021_02"></script>
+</body>
+</html>
