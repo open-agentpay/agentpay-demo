@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "deepseek-flash"
 
     class Config:
         env_file = ".env"

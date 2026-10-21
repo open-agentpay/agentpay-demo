@@ -1,22 +1,65 @@
-import os
-import sqlite3
-import time
-import uuid
+import logging
+import re
 from typing import Any, Dict, Optional
 
 import httpx
-from agentpay import LocalSigner, AsyncAgentPayClient
+from agentpay import AsyncAgentPayClient, LocalSigner
 from agentpay.policy import (
     BreakerState,
     PolicyConfig,
-    PolicyErrorCode,
-    PolicyViolationError,
     SQLitePolicyEngine,
     create_buyer_connection,
     init_buyer_database,
 )
 from core.config import settings, format_usdc, base_units_to_usdc
 from core.events import event_bus
+
+
+_http_debug_logger = logging.getLogger("agentpay.demo.http")
+_SENSITIVE_HEADER = re.compile(
+    r"authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|agent[-_]?key|"
+    r"payment[-_]signature|payment[-_]authorization|secret|token",
+    re.IGNORECASE,
+)
+
+
+def _debug_headers(headers: httpx.Headers) -> list[tuple[str, str]]:
+    """Keep the full header list while masking values that can authorize requests."""
+    return [
+        (name, "<redacted>" if _SENSITIVE_HEADER.search(name) else value)
+        for name, value in headers.multi_items()
+    ]
+
+
+class _DebugHTTPTransport(httpx.AsyncBaseTransport):
+    """Log each actual network exchange, including the 402 and signed retry."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport):
+        self._inner = inner
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        body = await request.aread()
+        _http_debug_logger.warning(
+            "HTTP REQUEST\n%s %s\nheaders=%r\nbody=%s",
+            request.method,
+            request.url,
+            _debug_headers(request.headers),
+            body.decode("utf-8", errors="replace"),
+        )
+        response = await self._inner.handle_async_request(request)
+        response_body = await response.aread()
+        _http_debug_logger.warning(
+            "HTTP RESPONSE\n%s %s\nstatus=%s\nheaders=%r\nbody=%s",
+            request.method,
+            request.url,
+            response.status_code,
+            _debug_headers(response.headers),
+            response_body.decode("utf-8", errors="replace"),
+        )
+        return response
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class PaymentManager:
@@ -34,15 +77,11 @@ class PaymentManager:
         self._client: Optional[AsyncAgentPayClient] = None
 
     def _build_default_config(
-        self,
-        max_per_tx: Optional[int] = None,
-        rolling_budget: Optional[int] = None,
-        circuit_rpm: Optional[int] = None,
+            self,
+            max_per_tx: Optional[int] = None,
+            rolling_budget: Optional[int] = None,
+            circuit_rpm: Optional[int] = None,
     ) -> PolicyConfig:
-        from urllib.parse import urlparse
-        gw_host = urlparse(settings.GATEWAY_URL).hostname or "127.0.0.1"
-        domains = {"127.0.0.1", "localhost", "testserver", gw_host, "agentpay.aipmedia.cn"}
-
         return PolicyConfig(
             id="briefing_agent_policy",
             name="AgentPay Briefing Policy",
@@ -52,10 +91,10 @@ class PaymentManager:
             circuit_max_rpm=circuit_rpm or settings.CIRCUIT_MAX_RPM,
             circuit_consecutive_failures=settings.CIRCUIT_CONSECUTIVE_FAILURES,
             circuit_cooldown_seconds=settings.CIRCUIT_COOLDOWN_SECONDS,
-            whitelist_networks=frozenset([settings.PAYMENT_NETWORK, "eip155:84532", "eip155:31337", "eip155:1337"]),
-            whitelist_assets=frozenset([settings.PAYMENT_ASSET, "0x036CbD53842c5426634e7929541eC2318f3dCF7e"]),
+            whitelist_networks=frozenset([settings.PAYMENT_NETWORK, "eip155:31337", "eip155:1337"]),
+            whitelist_assets=frozenset([settings.PAYMENT_ASSET]),
             whitelist_payees=frozenset([settings.SELLER_WALLET]),
-            whitelist_domains=frozenset(domains),
+            whitelist_domains=frozenset(["127.0.0.1", "localhost", "testserver", "agentpay.aipmedia.cn"]),
         )
 
     def set_custom_transport(self, transport: httpx.AsyncBaseTransport):
@@ -70,11 +109,15 @@ class PaymentManager:
                 headers["Authorization"] = f"Bearer {settings.AGENT_KEY}"
                 headers["X-Agent-Key"] = settings.AGENT_KEY
 
+            inner_transport = self._custom_transport or httpx.AsyncHTTPTransport()
             self._client = AsyncAgentPayClient(
                 signer=self.signer,
                 policy=self.engine,
                 headers=headers,
-                transport=self._custom_transport,
+                # Skip fixed credential estimates: evaluate the exact x402 challenge price instead.
+                # This demo's seller returns EIP-3009 challenges; the SDK dispatches by scheme.
+                wallet_challenge_mode=True,
+                transport=_DebugHTTPTransport(inner_transport),
                 raise_on_policy_rejection=True,
                 auto_retry_on_402=True,
                 timeout=10.0,
@@ -82,17 +125,16 @@ class PaymentManager:
         return self._client
 
     def update_policy(
-        self,
-        max_per_tx: Optional[int] = None,
-        rolling_budget: Optional[int] = None,
-        circuit_rpm: Optional[int] = None,
-        clear_budget_history: bool = False,
+            self,
+            max_per_tx: Optional[int] = None,
+            rolling_budget: Optional[int] = None,
+            circuit_rpm: Optional[int] = None,
+            clear_budget_history: bool = False,
     ):
         """Update active policy parameters and re-initialize engine."""
         if clear_budget_history:
             self.conn.execute("DELETE FROM ap_budget_ledger;")
             self.conn.execute("DELETE FROM ap_buyer_intent;")
-            self.conn.execute("UPDATE ap_policy SET breaker_state = 'CLOSED', tripped_at = NULL, consecutive_failures = 0;")
             self.conn.commit()
 
         self.current_config = self._build_default_config(
@@ -125,93 +167,6 @@ class PaymentManager:
             clear_budget_history=True,
         )
 
-    def check_guardrails_before_call(self, amount_base_units: int, resource_name: str) -> None:
-        """
-        Proactive Financial Firewall evaluation before dispatching tool call.
-        Enforces Zero-Trust Client-Side Guardrails:
-        1. Administrative lock (is_frozen)
-        2. Circuit Breaker (Breaker state & RPM limit)
-        3. Single-transaction cap (max_per_tx_base_units)
-        4. 24h rolling budget limit (available_rolling_budget)
-        """
-        now = int(time.time())
-        cursor = self.conn.cursor()
-
-        # 1. Administrative lock
-        if self.current_config.is_frozen:
-            raise PolicyViolationError(
-                PolicyErrorCode.POLICY_FROZEN,
-                f"Policy {self.current_config.id} is administratively frozen",
-            )
-
-        # 2. Circuit Breaker
-        current_breaker = self.engine.get_breaker_state()
-        if current_breaker == BreakerState.OPEN:
-            raise PolicyViolationError(
-                PolicyErrorCode.CIRCUIT_BREAKER_OPEN,
-                "Circuit breaker is OPEN. System is in cooldown protection.",
-            )
-
-        recent_requests = self.engine._query_requests_in_last_60s(cursor, now)
-        if recent_requests >= self.current_config.circuit_max_rpm:
-            # Trip breaker to OPEN in database
-            cursor.execute(
-                """
-                UPDATE ap_policy
-                SET breaker_state = 'OPEN', tripped_at = ?, updated_at = ?
-                WHERE id = ?;
-                """,
-                (now, now, self.current_config.id),
-            )
-            self.conn.commit()
-            raise PolicyViolationError(
-                PolicyErrorCode.CIRCUIT_BREAKER_OPEN,
-                f"Rate limit exceeded: {recent_requests} requests in last 60s >= {self.current_config.circuit_max_rpm} RPM threshold.",
-            )
-
-        # 3. Single-Tx Cap
-        if amount_base_units > self.current_config.max_per_tx_base_units:
-            raise PolicyViolationError(
-                PolicyErrorCode.SINGLE_TX_CAP_EXCEEDED,
-                f"Amount {amount_base_units} exceeds single transaction cap of {self.current_config.max_per_tx_base_units}",
-            )
-
-        # 4. 24h Rolling Budget
-        available = self.engine.get_available_rolling_budget()
-        if available < amount_base_units:
-            raise PolicyViolationError(
-                PolicyErrorCode.DAILY_BUDGET_EXCEEDED,
-                f"Available budget {available} is less than required amount {amount_base_units}",
-            )
-
-    def record_committed_spend(self, amount_base_units: int, resource_name: str) -> None:
-        """Record committed spend in budget ledger so budget and RPM are tracked."""
-        now = int(time.time())
-        res_id = f"res_{uuid.uuid4().hex}"
-        intent_id = f"intent_{uuid.uuid4().hex}"
-        expires_at = now + 360
-
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO ap_budget_ledger (
-                id, policy_id, wallet_address, intent_id,
-                amount_base_units, state, created_at, expires_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'COMMITTED', ?, ?, ?);
-            """,
-            (
-                res_id,
-                self.current_config.id,
-                self.current_config.wallet_address,
-                intent_id,
-                amount_base_units,
-                now,
-                expires_at,
-                now,
-            ),
-        )
-        self.conn.commit()
-
     def get_available_budget(self) -> int:
         try:
             return self.engine.get_available_rolling_budget()
@@ -239,7 +194,6 @@ class PaymentManager:
         total_spent_base_units = row[1] if row else 0
 
         return {
-            "agent_key": settings.AGENT_KEY,
             "wallet_address": self.signer.address,
             "network": settings.PAYMENT_NETWORK,
             "max_per_tx_base_units": self.current_config.max_per_tx_base_units,

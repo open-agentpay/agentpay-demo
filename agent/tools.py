@@ -1,8 +1,6 @@
-import json
 import time
 from typing import Any, Dict
-from agentpay.policy import PolicyErrorCode, PolicyViolationError
-from core.config import format_usdc, settings
+from core.config import settings
 from core.events import event_bus
 from payment.manager import payment_manager
 
@@ -109,57 +107,12 @@ def get_openai_tools():
     ]
 
 
-def get_policy_explanation(code_name: str, lang: str = "zh") -> str:
-    """Return localized explanation for a financial firewall policy violation."""
-    is_en = (lang or "").lower().startswith("en")
-    cap_str = format_usdc(payment_manager.current_config.max_per_tx_base_units)
-    avail_str = format_usdc(payment_manager.get_available_budget())
-    rpm_val = payment_manager.current_config.circuit_max_rpm
-
-    if is_en:
-        explanations_en = {
-            PolicyErrorCode.SINGLE_TX_CAP_EXCEEDED.value: (
-                f"Single-Tx Cap Blocked: The API price exceeds the agent's single-tx limit ({cap_str}). Zero funds lost."
-            ),
-            PolicyErrorCode.DAILY_BUDGET_EXCEEDED.value: (
-                f"24H Budget Exceeded: Remaining budget is insufficient for this call (Available: {avail_str}). Zero funds lost."
-            ),
-            PolicyErrorCode.CIRCUIT_BREAKER_OPEN.value: (
-                f"Circuit Breaker Open: Request frequency exceeded the protection threshold ({rpm_val} RPM). System entered cooldown."
-            ),
-            PolicyErrorCode.NETWORK_NOT_WHITELISTED.value: "Network Whitelist Blocked: Payment network is not in the trusted whitelist.",
-            PolicyErrorCode.ASSET_NOT_WHITELISTED.value: "Asset Whitelist Blocked: Payment token asset is not in the whitelist.",
-            PolicyErrorCode.PAYEE_NOT_WHITELISTED.value: "Payee Whitelist Blocked: Payee address is not in the whitelist.",
-            PolicyErrorCode.DOMAIN_NOT_WHITELISTED.value: "Domain Whitelist Blocked: Target domain is not in the whitelist.",
-            PolicyErrorCode.POLICY_FROZEN.value: "Policy Frozen: Agent is administratively frozen, all outgoing payments are disabled.",
-        }
-        return explanations_en.get(code_name, f"Financial firewall rejected payment ({code_name})")
-    else:
-        explanations_zh = {
-            PolicyErrorCode.SINGLE_TX_CAP_EXCEEDED.value: (
-                f"单笔支付超限拦截：接口要价超过了本智能体单笔上限 ({cap_str})。资金零损失。"
-            ),
-            PolicyErrorCode.DAILY_BUDGET_EXCEEDED.value: (
-                f"24小时累计预算不足拦截：当前剩余预算不足以支付该接口费用 (当前剩余 {avail_str})。资金零损失。"
-            ),
-            PolicyErrorCode.CIRCUIT_BREAKER_OPEN.value: (
-                f"高频调用熔断拦截：请求频率超过了熔断保护阈值 ({rpm_val} RPM)。系统进入冷却保护。"
-            ),
-            PolicyErrorCode.NETWORK_NOT_WHITELISTED.value: "网络白名单拦截：该支付网络不在受信任白名单中。",
-            PolicyErrorCode.ASSET_NOT_WHITELISTED.value: "资产白名单拦截：该支付代币不在白名单中。",
-            PolicyErrorCode.PAYEE_NOT_WHITELISTED.value: "收款商户白名单拦截：该收款地址不在白名单中。",
-            PolicyErrorCode.DOMAIN_NOT_WHITELISTED.value: "域名白名单拦截：请求的目标域名不在安全白名单中。",
-            PolicyErrorCode.POLICY_FROZEN.value: "智能体处于管理冻结状态，禁止一切对外支付。",
-        }
-        return explanations_zh.get(code_name, f"金融防火墙策略拒绝支付 ({code_name})")
-
-
 async def execute_tool_call(tool_name: str, arguments: Dict[str, Any], lang: str = "zh") -> Dict[str, Any]:
     """
     Executes a paid tool call via AgentPayClient.
-    Zero-Trust Boundary:
-    The LLM proposes the call; AgentPayClient intercepts 402, evaluates local SQLite policy,
-    and either signs or throws PolicyViolationError without LLM intervention.
+    The demo only invokes the AgentPay Python SDK client.
+    Payment policy checks, budget limits, circuit breakers, and payment accounting
+    are handled internally by the SDK.
 
     Constraint: All tool parameter values (city, consName) are strictly converted to Simplified Chinese.
     """
@@ -197,34 +150,15 @@ async def execute_tool_call(tool_name: str, arguments: Dict[str, Any], lang: str
         },
     )
 
-    expected_cost = 50_000 if tool_name == "get_weather" else 100_000
     url = f"{gateway_base}{path}"
 
     try:
-        # 1. Proactive Zero-Trust Financial Firewall Evaluation (Client-Side Gatekeeper)
-        payment_manager.check_guardrails_before_call(expected_cost, tool_name)
-
-        ledger_count_before = payment_manager.conn.execute(
-            "SELECT count(*) FROM ap_budget_ledger WHERE policy_id = ?;",
-            (payment_manager.current_config.id,),
-        ).fetchone()[0]
-
         response = await client.get(url, params=params)
         duration_ms = int((time.time() - start_time) * 1000)
 
         if response.status_code == 200:
-            ledger_count_after = payment_manager.conn.execute(
-                "SELECT count(*) FROM ap_budget_ledger WHERE policy_id = ?;",
-                (payment_manager.current_config.id,),
-            ).fetchone()[0]
-
-            # If AgentPayTransport did not intercept 402 (e.g. server returned direct 200), record spend locally:
-            if ledger_count_after == ledger_count_before:
-                payment_manager.record_committed_spend(expected_cost, tool_name)
-
             data = response.json()
             receipt = data.get("x402_receipt", {})
-            cost = receipt.get("amount_base_units", expected_cost)
 
             event_bus.publish(
                 "TOOL_EXECUTION_SUCCESS",
@@ -233,9 +167,7 @@ async def execute_tool_call(tool_name: str, arguments: Dict[str, Any], lang: str
                     "url": path,
                     "status_code": 200,
                     "duration_ms": duration_ms,
-                    "cost_formatted": format_usdc(cost),
                     "receipt": receipt,
-                    "available_budget": format_usdc(payment_manager.get_available_budget()),
                 },
             )
             return {"ok": True, "data": data}
@@ -245,36 +177,6 @@ async def execute_tool_call(tool_name: str, arguments: Dict[str, Any], lang: str
                 "status_code": response.status_code,
                 "error": response.text,
             }
-
-    except PolicyViolationError as e:
-        duration_ms = int((time.time() - start_time) * 1000)
-        code_name = e.code.value if hasattr(e.code, "value") else str(e.code)
-
-        explanation_zh = get_policy_explanation(code_name, "zh")
-        explanation_en = get_policy_explanation(code_name, "en")
-        human_explanation = explanation_en if (lang or "").lower().startswith("en") else explanation_zh
-
-        event_bus.publish(
-            "POLICY_BLOCKED",
-            {
-                "tool": tool_name,
-                "url": path,
-                "rule_violated": code_name,
-                "duration_ms": duration_ms,
-                "explanation": human_explanation,
-                "explanation_zh": explanation_zh,
-                "explanation_en": explanation_en,
-                "available_budget": format_usdc(payment_manager.get_available_budget()),
-            },
-        )
-
-        return {
-            "ok": False,
-            "error_code": "FINANCIAL_POLICY_BLOCKED",
-            "rule": code_name,
-            "message": human_explanation,
-            "funds_lost": "0 USDC (Fail-Closed)",
-        }
 
     except Exception as e:
         duration_ms = int((time.time() - start_time) * 1000)
