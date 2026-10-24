@@ -35,7 +35,7 @@ def _create_challenge(
         scheme="EIP-3009",
         valid_after=now - 30,
         valid_before=now + 300,
-        facilitator_url=f"http://{settings.GATEWAY_HOST}:{settings.GATEWAY_PORT}/facilitator",
+        facilitator_url=settings.FACILITATOR_URL,
         resource_uri=f"{settings.GATEWAY_URL}{resource_path}",
     )
     issued_challenges[cid] = {

@@ -14,7 +14,6 @@ from agentpay.policy import (
 from core.config import settings, format_usdc, base_units_to_usdc
 from core.events import event_bus
 
-
 _http_debug_logger = logging.getLogger("agentpay.demo.http")
 _SENSITIVE_HEADER = re.compile(
     r"authorization|proxy-authorization|cookie|set-cookie|api[-_]?key|agent[-_]?key|"
@@ -38,24 +37,40 @@ class _DebugHTTPTransport(httpx.AsyncBaseTransport):
         self._inner = inner
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        body = await request.aread()
-        _http_debug_logger.warning(
-            "HTTP REQUEST\n%s %s\nheaders=%r\nbody=%s",
-            request.method,
-            request.url,
-            _debug_headers(request.headers),
-            body.decode("utf-8", errors="replace"),
-        )
-        response = await self._inner.handle_async_request(request)
-        response_body = await response.aread()
-        _http_debug_logger.warning(
-            "HTTP RESPONSE\n%s %s\nstatus=%s\nheaders=%r\nbody=%s",
-            request.method,
-            request.url,
-            response.status_code,
-            _debug_headers(response.headers),
-            response_body.decode("utf-8", errors="replace"),
-        )
+        if settings.HTTP_DEBUG_LOGGING:
+            body = await request.aread()
+            _http_debug_logger.info(
+                "HTTP REQUEST OUTBOUND\n%s %s\nheaders=%r\nbody=%s",
+                request.method,
+                request.url,
+                _debug_headers(request.headers),
+                body.decode("utf-8", errors="replace"),
+            )
+        try:
+            response = await self._inner.handle_async_request(request)
+        except Exception as exc:
+            if settings.HTTP_DEBUG_LOGGING:
+                _http_debug_logger.error(
+                    "HTTP REQUEST FAILED (Network / Transport Exception)\n%s %s\nheaders=%r\nerror=%s: %s",
+                    request.method,
+                    request.url,
+                    _debug_headers(request.headers),
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+            raise
+
+        if settings.HTTP_DEBUG_LOGGING:
+            response_body = await response.aread()
+            _http_debug_logger.info(
+                "HTTP RESPONSE INBOUND\n%s %s\nstatus=%s\nheaders=%r\nbody=%s",
+                request.method,
+                request.url,
+                response.status_code,
+                _debug_headers(response.headers),
+                response_body.decode("utf-8", errors="replace"),
+            )
         return response
 
     async def aclose(self) -> None:
@@ -91,7 +106,7 @@ class PaymentManager:
             circuit_max_rpm=circuit_rpm or settings.CIRCUIT_MAX_RPM,
             circuit_consecutive_failures=settings.CIRCUIT_CONSECUTIVE_FAILURES,
             circuit_cooldown_seconds=settings.CIRCUIT_COOLDOWN_SECONDS,
-            whitelist_networks=frozenset([settings.PAYMENT_NETWORK, "eip155:31337", "eip155:1337"]),
+            whitelist_networks=frozenset([settings.PAYMENT_NETWORK, "eip155:31337", "eip155:1337", "eip155:84532"]),
             whitelist_assets=frozenset([settings.PAYMENT_ASSET]),
             whitelist_payees=frozenset([settings.SELLER_WALLET]),
             whitelist_domains=frozenset(["127.0.0.1", "localhost", "testserver", "agentpay.aipmedia.cn"]),
@@ -110,14 +125,19 @@ class PaymentManager:
                 headers["X-Agent-Key"] = settings.AGENT_KEY
 
             inner_transport = self._custom_transport or httpx.AsyncHTTPTransport()
+            transport = (
+                _DebugHTTPTransport(inner_transport)
+                if settings.HTTP_DEBUG_LOGGING
+                else inner_transport
+            )
             self._client = AsyncAgentPayClient(
                 signer=self.signer,
                 policy=self.engine,
                 headers=headers,
                 # Skip fixed credential estimates: evaluate the exact x402 challenge price instead.
                 # This demo's seller returns EIP-3009 challenges; the SDK dispatches by scheme.
-                wallet_challenge_mode=True,
-                transport=_DebugHTTPTransport(inner_transport),
+                wallet_challenge_mode=bool(settings.AGENT_KEY),
+                transport=transport,
                 raise_on_policy_rejection=True,
                 auto_retry_on_402=True,
                 timeout=10.0,
@@ -166,6 +186,10 @@ class PaymentManager:
             circuit_rpm=settings.CIRCUIT_MAX_RPM,
             clear_budget_history=True,
         )
+        try:
+            self.engine.reset_breaker()
+        except Exception:
+            pass
 
     def get_available_budget(self) -> int:
         try:

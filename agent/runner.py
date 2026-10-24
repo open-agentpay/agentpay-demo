@@ -249,8 +249,8 @@ class MockAgentRunner(BaseAgentRunner):
                         f"  - 幸运色/幸运数：{color} / {number}"
                     )
             else:
-                rule = res.get("rule", "BLOCKED")
-                msg = res.get("message", "支付被策略拒绝")
+                rule = res.get("rule") or res.get("error") or "BLOCKED"
+                msg = res.get("message") or res.get("detail") or "支付被策略拒绝"
                 blocked_items.append(f"• `{tool}`: **拦截拒绝** ({rule}) - {msg}")
 
         if blocked_items:
@@ -318,8 +318,8 @@ class MockAgentRunner(BaseAgentRunner):
                         f"  - Lucky Color / Number: {color} / {number}"
                     )
             else:
-                rule = res.get("rule", "BLOCKED")
-                msg = res.get("message", "Payment rejected by policy")
+                rule = res.get("rule") or res.get("error") or "BLOCKED"
+                msg = res.get("message") or res.get("detail") or "Payment rejected by policy"
                 blocked_items.append(f"• `{tool}`: **Blocked** ({rule}) - {msg}")
 
         if blocked_items:
